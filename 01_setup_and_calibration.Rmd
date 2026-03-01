@@ -1,0 +1,336 @@
+---
+title: "01 — Setup and Calibration"
+author: "Natalie Love"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+## Overview
+
+This notebook handles two things before you process any scans:
+
+1. **Package installation** — installs `EBImage` (Bioconductor) and any other
+   dependencies needed by the pipeline.
+2. **Scale bar calibration** — verifies the pixel-to-millimeter conversion for
+   your scanner so that all area measurements are in real-world units (cm²).
+
+Run this notebook once before running `02_batch_segment.Rmd`. You only need to
+re-run it if you change scanners or scanning resolution.
+
+---
+
+## 1. Install required packages
+
+`EBImage` is a Bioconductor package designed for image processing and analysis.
+It handles reading TIFFs, thresholding, connected-component labeling, and shape
+feature extraction — everything this pipeline needs.
+
+**Note:** The first installation can take several minutes because EBImage compiles
+from source.
+
+```{r install-packages, message=FALSE, warning=FALSE}
+# Install BiocManager if not already present
+if (!require("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+# Install EBImage via Bioconductor
+if (!require("EBImage", quietly = TRUE)) {
+  BiocManager::install("EBImage", ask = FALSE)
+}
+
+# CRAN packages (tidyverse is almost certainly already installed)
+cran_pkgs <- c("tidyverse", "fs")
+for (pkg in cran_pkgs) {
+  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+# Load everything
+library(EBImage)
+library(tidyverse)
+library(fs)
+
+cat("All packages loaded successfully.\n")
+cat("EBImage version:", as.character(packageVersion("EBImage")), "\n")
+```
+
+---
+
+## 2. User configuration
+
+**Edit the paths and parameters in this chunk.** These values are used by all
+three notebooks. Copy them into the matching chunk at the top of
+`02_batch_segment.Rmd` and `03_sla_calculation.Rmd` as well.
+
+```{r user-config}
+# ── Path to the folder containing your raw TIFF scans ──────────────────────
+# Use an absolute path or a path relative to the project root.
+scan_folder <- "/Users/natalielove/Dropbox/1-Cloud/CBG/Research/Gymnocladus_dioicus/field_work/06232025_Ames_Iowa/leaf_scans"
+
+# ── Output folders (created automatically if they don't exist) ──────────────
+output_labels <- "output/labeled_images"   # annotated review PNGs
+output_tables <- "output/area_tables"      # per-scan and master CSVs
+
+# ── Scanner resolution ───────────────────────────────────────────────────────
+# Dots per inch used when the scans were captured.
+dpi <- 300
+
+# ── Scale bar calibration ────────────────────────────────────────────────────
+# Derived automatically from DPI:
+#   300 pixels / 25.4 mm per inch = 11.811 pixels per mm
+px_per_mm  <- dpi / 25.4
+px_per_cm  <- px_per_mm * 10
+px2_per_cm2 <- px_per_cm^2   # pixels² per cm²
+
+cat(sprintf("Calibration: %.3f px/mm  |  %.3f px/cm  |  %.1f px²/cm²\n",
+            px_per_mm, px_per_cm, px2_per_cm2))
+
+# ── Segmentation thresholds ──────────────────────────────────────────────────
+# Minimum object area to keep (cm²). Objects smaller than this are treated as
+# dust, scanner noise, or tiny debris and discarded.
+# Gymnocladus leaflets are typically > 1 cm², so 0.25 cm² is conservative.
+min_area_cm2 <- 0.25
+
+# Maximum elongation ratio (radius_max / radius_min) for an object to be kept.
+# The white ruler is extremely elongated (long, thin bar). Leaf pieces and the
+# color card are much more compact. A ratio above ~6 almost certainly indicates
+# the ruler or a similar artifact.
+max_elongation <- 6.0
+
+# ── Output image resolution ─────────────────────────────────────────────────
+# Labeled review images are saved at a fraction of the original resolution to
+# keep file sizes manageable (originals are ~56 MB each).
+# 0.25 = quarter resolution (saves 4x storage, still easy to read labels).
+review_scale <- 0.25
+
+# Print a summary of all key parameters
+cat("\n── Configuration summary ──────────────────────────────────────────────\n")
+cat("Scan folder:         ", scan_folder, "\n")
+cat("Output labels:       ", output_labels, "\n")
+cat("Output tables:       ", output_tables, "\n")
+cat("DPI:                 ", dpi, "\n")
+cat("Min object area:     ", min_area_cm2, "cm²\n")
+cat("Max elongation ratio:", max_elongation, "\n")
+cat("Review image scale:  ", review_scale, "\n")
+```
+
+---
+
+## 3. Verify the scan folder and list files
+
+```{r check-files}
+# Create output directories if they don't exist
+dir_create(output_labels)
+dir_create(output_tables)
+
+# List all TIFF files in the scan folder
+tif_files <- dir_ls(scan_folder, regexp = "\\.tif$", ignore.case = TRUE)
+
+cat(sprintf("Found %d TIFF files in:\n  %s\n\n", length(tif_files), scan_folder))
+cat(paste(basename(tif_files), collapse = "\n"), "\n")
+```
+
+---
+
+## 4. Load a test image and inspect it
+
+We load a single scan to confirm image dimensions, confirm the file reads
+correctly, and display a thumbnail so you can visually confirm the layout.
+
+```{r load-test-image, fig.width=6, fig.height=9}
+# Load the first scan as a test
+test_path <- tif_files[1]
+cat("Loading:", basename(test_path), "\n")
+
+img <- readImage(test_path)
+
+# Report basic properties
+cat(sprintf(
+  "Dimensions : %d x %d pixels (width x height)\n",
+  dim(img)[1], dim(img)[2]
+))
+cat(sprintf(
+  "Physical size at %d DPI: %.1f mm x %.1f mm\n",
+  dpi,
+  dim(img)[1] / px_per_mm,
+  dim(img)[2] / px_per_mm
+))
+cat("Color channels:", dim(img)[3], "\n")
+cat("Pixel value range: [", min(img), ",", max(img), "]\n")
+
+# Display a thumbnail (resize to ~10% for fast rendering in the notebook)
+display(resize(img, w = round(dim(img)[1] * 0.10)), method = "raster")
+```
+
+---
+
+## 5. Scale bar calibration check
+
+The pipeline derives pixels-per-mm directly from the scanner DPI (`300 / 25.4`).
+This is mathematically exact *if* the scanner is truly set to 300 DPI.
+
+Here we verify the calibration visually by cropping the bottom-right corner
+of the test image (where the white ruler lives) and measuring how many pixels
+correspond to a known distance on the ruler.
+
+```{r calibration-check, fig.width=5, fig.height=3}
+# Crop the bottom-right corner of the image where the ruler is located.
+# Adjust these fractions if the ruler is positioned differently in your scans.
+crop_bottom_frac <- 0.15   # take the bottom 15% of the image height
+crop_right_frac  <- 0.35   # take the right 35% of the image width
+
+img_w <- dim(img)[1]
+img_h <- dim(img)[2]
+
+x_start <- round(img_w * (1 - crop_right_frac))
+y_start <- round(img_h * (1 - crop_bottom_frac))
+
+ruler_crop <- img[x_start:img_w, y_start:img_h, ]
+
+cat(sprintf("Ruler crop: %d x %d pixels\n", dim(ruler_crop)[1], dim(ruler_crop)[2]))
+display(ruler_crop, method = "raster")
+```
+
+```{r expected-calibration}
+# ── Expected pixel widths for common ruler distances at 300 DPI ─────────────
+distances_mm <- c(10, 20, 30, 50, 100)
+cat("Expected pixel widths at 300 DPI:\n")
+for (d in distances_mm) {
+  cat(sprintf("  %3d mm  =  %6.1f pixels\n", d, d * px_per_mm))
+}
+
+cat(sprintf(
+  "\nTo verify: find two tick marks separated by a known distance on the ruler\n",
+))
+cat(sprintf(
+  "in the cropped image above. The pixel distance between them should match\n"
+))
+cat(sprintf(
+  "the values in the table. If they differ by more than ~2%%, update `dpi`\n"
+))
+cat(sprintf(
+  "in the user configuration chunk above.\n"
+))
+```
+
+---
+
+## 6. Test segmentation on the example image
+
+This section runs the full segmentation on the test image so you can visually
+confirm that the algorithm correctly identifies the leaf pieces before running
+the batch job.
+
+See `02_batch_segment.Rmd` for full documentation of each step.
+
+```{r test-segmentation, fig.width=6, fig.height=9, message=FALSE}
+source_dir <- scan_folder   # used below for inline test
+
+# ── Step 1: Convert to grayscale (luminance) ─────────────────────────────────
+gray <- channel(img, "luminance")
+
+# ── Step 2: Determine threshold using Otsu's method ─────────────────────────
+# Otsu's method finds the threshold that minimises within-class variance between
+# the dark background and the bright foreground (leaf material + ruler + card).
+th <- otsu(gray)
+cat(sprintf("Otsu threshold: %.4f  (pixel values range 0–1)\n", th))
+
+# ── Step 3: Create binary mask ───────────────────────────────────────────────
+binary <- gray > th
+
+# ── Step 4: Morphological opening to remove isolated bright specks ───────────
+# "Opening" = erosion followed by dilation. It removes objects smaller than the
+# structuring element (a 3x3 square here) while preserving larger shapes.
+binary_clean <- opening(binary, makeBrush(3, shape = "box"))
+
+# ── Step 5: Fill interior holes ──────────────────────────────────────────────
+# Leaf veins can create small dark holes inside the leaf mask. fillHull() fills
+# any enclosed dark region within a bright object.
+binary_filled <- fillHull(binary_clean)
+
+# ── Step 6: Label connected components ──────────────────────────────────────
+# Each spatially separate bright region gets a unique integer label.
+labeled <- bwlabel(binary_filled)
+n_raw <- max(labeled)
+cat(sprintf("Connected components before filtering: %d\n", n_raw))
+
+# ── Step 7: Compute shape features for each labeled object ──────────────────
+features <- computeFeatures.shape(labeled)
+# Columns: s.area, s.perimeter, s.radius.mean, s.radius.sd,
+#          s.radius.max, s.radius.min
+
+# ── Step 8: Filter by area ───────────────────────────────────────────────────
+min_area_px <- min_area_cm2 * px2_per_cm2
+keep_area   <- features[, "s.area"] >= min_area_px
+
+# ── Step 9: Filter by elongation ─────────────────────────────────────────────
+# elongation = longest radius / shortest radius
+# A long, thin ruler will have a very large ratio; leaves will not.
+elongation <- features[, "s.radius.max"] / pmax(features[, "s.radius.min"], 1)
+keep_shape  <- elongation <= max_elongation
+
+# Combine filters
+keep        <- keep_area & keep_shape
+valid_ids   <- which(keep)
+cat(sprintf("Objects after filtering: %d\n", length(valid_ids)))
+
+# ── Step 10: Get centroids for label placement ───────────────────────────────
+moments <- computeFeatures.moment(labeled)
+
+# ── Step 11: Display annotated review image ─────────────────────────────────
+# Overlay outlines of surviving objects on the original image
+img_annotated <- paintObjects(
+  x      = labeled,
+  tgt    = img,
+  opac   = c(0.8, 0.3),          # (outline opacity, fill opacity)
+  col    = c("#FF0000", "#FF000020"),   # red outline, faint red fill
+  thick  = TRUE
+)
+
+display(resize(img_annotated, w = round(dim(img_annotated)[1] * review_scale)),
+        method = "raster")
+```
+
+```{r test-area-table}
+# Build a tidy area table for the test image
+area_table <- tibble(
+  scan_id     = tools::file_path_sans_ext(basename(test_path)),
+  piece_num   = seq_along(valid_ids),
+  orig_label  = valid_ids,
+  area_px     = features[valid_ids, "s.area"],
+  area_mm2    = area_px / (px_per_mm^2),
+  area_cm2    = area_px / px2_per_cm2,
+  centroid_x  = round(moments[valid_ids, "m.cx"]),
+  centroid_y  = round(moments[valid_ids, "m.cy"]),
+  elongation  = round(elongation[valid_ids], 2)
+)
+
+print(area_table)
+cat(sprintf("\nTotal area of all pieces: %.2f cm²\n", sum(area_table$area_cm2)))
+```
+
+---
+
+## 7. Summary
+
+If the calibration check and test segmentation look correct, you are ready to
+run `02_batch_segment.Rmd` on all scans.
+
+Things to confirm before proceeding:
+
+- [ ] The ruler crop shows a readable ruler with tick marks
+- [ ] The expected pixel widths match what you see on the ruler
+- [ ] The test segmentation correctly outlines the leaf pieces
+- [ ] The number of detected objects is plausible for your scan
+- [ ] No large non-leaf objects (ruler, color card) appear in the area table
+      (if they do, increase `max_elongation` or adjust filters in 02)
+
+```{r session-info}
+sessionInfo()
+```

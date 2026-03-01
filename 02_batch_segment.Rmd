@@ -1,0 +1,436 @@
+---
+title: "02 — Batch Leaf Segmentation"
+author: "Natalie Love"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+## Overview
+
+This notebook processes every TIFF scan in your scan folder and produces two
+outputs for each image:
+
+1. **Labeled review PNG** — the original scan with each detected piece numbered
+   in red so you can visually verify which pieces were found and spot any that
+   should be excluded (e.g., the color card if it is not fully masked out).
+2. **Per-scan area CSV** — one row per piece, with pixel area, area in mm², and
+   area in cm².
+
+At the end, all per-scan CSVs are combined into a single master table
+(`master_leaf_areas.csv`) that feeds into `03_sla_calculation.Rmd`.
+
+### Image analysis pipeline (one scan)
+
+```
+Read TIFF (RGB, 0–1)
+  ↓ convert to grayscale (luminance)
+  ↓ Otsu threshold → binary mask
+  ↓ morphological opening (remove tiny bright specks / noise)
+  ↓ fill enclosed holes (leaf veins create small dark holes)
+  ↓ label connected components (bwlabel)
+  ↓ compute shape features per object (area, radii)
+  ↓ filter: drop objects < min_area_cm2
+  ↓ filter: drop objects with elongation > max_elongation  ← removes ruler
+  ↓ renumber surviving objects 1, 2, 3 …
+  ↓ save annotated PNG + area CSV
+```
+
+---
+
+## 1. Load packages
+
+```{r load-packages, message=FALSE, warning=FALSE}
+library(EBImage)
+library(tidyverse)
+library(fs)
+```
+
+---
+
+## 2. User configuration
+
+**Copy the same values you set in `01_setup_and_calibration.Rmd`.**
+
+```{r user-config}
+# ── Paths ────────────────────────────────────────────────────────────────────
+scan_folder    <- "/Users/natalielove/Dropbox/1-Cloud/CBG/Research/Gymnocladus_dioicus/field_work/06232025_Ames_Iowa/leaf_scans"
+output_labels  <- "output/labeled_images"
+output_tables  <- "output/area_tables"
+
+# ── Scanner calibration ───────────────────────────────────────────────────────
+dpi            <- 300
+px_per_mm      <- dpi / 25.4
+px_per_cm      <- px_per_mm * 10
+px2_per_cm2    <- px_per_cm^2
+
+# ── Segmentation filters ──────────────────────────────────────────────────────
+# Minimum object area to keep (cm²). Objects smaller than this are discarded
+# as noise or debris. Gymnocladus leaflets are typically 2–10 cm², so 0.25 cm²
+# is conservative enough to catch any fragmented rachis pieces.
+min_area_cm2   <- 0.25
+
+# Maximum elongation ratio (longest radius / shortest radius).
+# The white ruler is extremely elongated. Set this to exclude it automatically.
+# Leaf pieces and the color card are more compact (ratio usually < 4).
+max_elongation <- 6.0
+
+# ── Output image scale ────────────────────────────────────────────────────────
+# Review PNGs are saved at this fraction of the original resolution.
+# 0.25 = quarter size — legible for reviewing piece numbers, much smaller files.
+review_scale   <- 0.25
+
+# ── Create output directories if needed ──────────────────────────────────────
+dir_create(output_labels)
+dir_create(output_tables)
+
+cat("Configuration loaded.\n")
+```
+
+---
+
+## 3. Define the segmentation function
+
+`segment_scan()` takes one TIFF path and the calibration/filter parameters,
+and returns a named list with:
+
+- `area_table` — tidy tibble with one row per detected piece
+- `img_annotated` — EBImage Image object with numbered pieces overlaid on the
+  original scan (for saving as a review PNG)
+- `n_raw` — total connected components before filtering (diagnostic)
+- `n_kept` — number of pieces after filtering
+
+```{r define-function}
+segment_scan <- function(tif_path,
+                         px_per_mm      = 300 / 25.4,
+                         min_area_cm2   = 0.25,
+                         max_elongation = 6.0) {
+
+  px2_per_cm2 <- (px_per_mm * 10)^2   # pixels² per cm²
+  scan_id     <- tools::file_path_sans_ext(basename(tif_path))
+
+  # ── 1. Read image ────────────────────────────────────────────────────────
+  img <- readImage(tif_path)
+  img_w <- dim(img)[1]
+  img_h <- dim(img)[2]
+
+  # ── 2. Convert to grayscale (luminance) ──────────────────────────────────
+  # Luminance = 0.2126 R + 0.7152 G + 0.0722 B (ITU-R BT.709 weights).
+  # This is more perceptually accurate than a simple channel average and
+  # weights green more heavily — useful since leaves are green.
+  gray <- channel(img, "luminance")
+
+  # ── 3. Otsu's threshold ───────────────────────────────────────────────────
+  # Otsu's method automatically finds the threshold that minimises within-class
+  # variance between the dark background and bright foreground. It adapts to
+  # slight differences in scanner brightness across sessions.
+  th     <- otsu(gray)
+  binary <- gray > th
+
+  # ── 4. Morphological opening (noise removal) ─────────────────────────────
+  # Erosion removes any bright feature smaller than the 3×3 kernel; dilation
+  # restores the edges of larger objects. Together this eliminates isolated
+  # bright pixels (dust, scanner noise) without affecting leaf areas.
+  binary_clean <- opening(binary, makeBrush(3, shape = "box"))
+
+  # ── 5. Fill enclosed holes ────────────────────────────────────────────────
+  # Leaf veins can appear slightly darker than the blade, sometimes creating
+  # small "holes" in the binary mask. fillHull() fills any enclosed dark area
+  # within a bright object, giving a solid leaf outline.
+  binary_filled <- fillHull(binary_clean)
+
+  # ── 6. Label connected components ────────────────────────────────────────
+  # Each spatially separate bright region is assigned a unique integer ID.
+  # Pieces that touch will be merged into one label — if this is a problem,
+  # ensure leaves are well-separated on the scanner bed.
+  labeled <- bwlabel(binary_filled)
+  n_raw   <- max(labeled)
+
+  # ── 7. Compute shape features ─────────────────────────────────────────────
+  # computeFeatures.shape() returns a matrix (one row per label) with:
+  #   s.area       — area in pixels
+  #   s.perimeter  — perimeter in pixels
+  #   s.radius.mean, s.radius.sd, s.radius.max, s.radius.min
+  features <- computeFeatures.shape(labeled)
+
+  # ── 8. Compute centroids ──────────────────────────────────────────────────
+  # Used to place piece-number labels on the review image.
+  # m.cx = x centroid (pixels from left edge, 1 to width)
+  # m.cy = y centroid (pixels from top edge, 1 to height)
+  moments <- computeFeatures.moment(labeled)
+
+  # ── 9. Filter: minimum area ───────────────────────────────────────────────
+  min_area_px <- min_area_cm2 * px2_per_cm2
+  keep_area   <- features[, "s.area"] >= min_area_px
+
+  # ── 10. Filter: maximum elongation (removes ruler) ────────────────────────
+  # Elongation = longest principal radius / shortest principal radius.
+  # pmax(..., 1) prevents division by zero for degenerate single-pixel objects.
+  elongation  <- features[, "s.radius.max"] / pmax(features[, "s.radius.min"], 1)
+  keep_shape  <- elongation <= max_elongation
+
+  valid_ids <- which(keep_area & keep_shape)
+  n_kept    <- length(valid_ids)
+
+  # ── 11. Build area table ──────────────────────────────────────────────────
+  # piece_num is a sequential integer assigned to surviving objects (1, 2, …).
+  # orig_label is the raw EBImage label ID (useful for debugging if a piece
+  # looks wrong in the review image).
+  area_table <- tibble(
+    scan_id    = scan_id,
+    piece_num  = seq_along(valid_ids),
+    orig_label = valid_ids,
+    area_px    = features[valid_ids, "s.area"],
+    area_mm2   = round(area_px / (px_per_mm^2), 3),
+    area_cm2   = round(area_px / px2_per_cm2, 4),
+    centroid_x = round(moments[valid_ids, "m.cx"]),
+    centroid_y = round(moments[valid_ids, "m.cy"]),
+    elongation = round(elongation[valid_ids], 2)
+  )
+
+  # ── 12. Build annotated review image ─────────────────────────────────────
+  # paintObjects() draws a red outline around each surviving labeled object on
+  # a copy of the original image. We then annotate with piece numbers (see
+  # the batch loop below, which handles text rendering via R graphics).
+  #
+  # To highlight only valid objects, zero out non-valid labels in a copy of
+  # the labeled mask, then paint.
+  labeled_valid        <- labeled
+  all_ids              <- seq_len(n_raw)
+  invalid_ids          <- setdiff(all_ids, valid_ids)
+  for (bad_id in invalid_ids) {
+    labeled_valid[labeled_valid == bad_id] <- 0L
+  }
+
+  img_annotated <- paintObjects(
+    x    = labeled_valid,
+    tgt  = img,
+    opac = c(1, 0),              # solid outline, no fill
+    col  = c("#FF3300", NA),     # red outlines only
+    thick = TRUE
+  )
+
+  list(
+    area_table    = area_table,
+    img_annotated = img_annotated,
+    moments       = moments,
+    valid_ids     = valid_ids,
+    n_raw         = n_raw,
+    n_kept        = n_kept
+  )
+}
+```
+
+---
+
+## 4. Batch process all scans
+
+This loop calls `segment_scan()` on every TIFF in the scan folder, saves
+outputs, and appends results to a running list.
+
+A progress counter keeps you informed, and each scan gets a one-line summary.
+
+```{r batch-process, message=FALSE, warning=FALSE}
+# Collect all TIFF paths
+tif_files <- dir_ls(scan_folder, regexp = "\\.tif$", ignore.case = TRUE)
+n_scans   <- length(tif_files)
+cat(sprintf("Processing %d scans...\n\n", n_scans))
+
+# Container for all per-scan results
+all_areas <- vector("list", n_scans)
+
+for (i in seq_along(tif_files)) {
+
+  tif_path <- tif_files[i]
+  scan_id  <- tools::file_path_sans_ext(basename(tif_path))
+
+  cat(sprintf("[%d/%d] %s ...", i, n_scans, scan_id))
+
+  # ── Run segmentation ────────────────────────────────────────────────────
+  result <- segment_scan(
+    tif_path      = tif_path,
+    px_per_mm     = px_per_mm,
+    min_area_cm2  = min_area_cm2,
+    max_elongation = max_elongation
+  )
+
+  cat(sprintf(" %d pieces found (from %d components)\n",
+              result$n_kept, result$n_raw))
+
+  # ── Save per-scan area CSV ───────────────────────────────────────────────
+  csv_path <- file.path(output_tables, paste0(scan_id, "_areas.csv"))
+  write_csv(result$area_table, csv_path)
+
+  # ── Save labeled review PNG ──────────────────────────────────────────────
+  # The PNG is saved at review_scale of original resolution to reduce disk use.
+  # We open a PNG device, draw the annotated image, then add red text labels
+  # at each piece centroid.
+  png_path <- file.path(output_labels, paste0(scan_id, "_labeled.png"))
+
+  img_ann  <- result$img_annotated
+  out_w    <- round(dim(img_ann)[1] * review_scale)
+  out_h    <- round(dim(img_ann)[2] * review_scale)
+
+  # Scale factor for centroid coordinates and text size
+  scale_cx <- out_w / dim(img_ann)[1]
+  scale_cy <- out_h / dim(img_ann)[2]
+
+  png(png_path, width = out_w, height = out_h, units = "px", bg = "black")
+  par(mar = c(0, 0, 0, 0), oma = c(0, 0, 0, 0))
+
+  # Render image as a raster within a [0,1] x [0,1] plot space
+  plot(
+    NULL,
+    xlim = c(0, 1), ylim = c(0, 1),
+    xlab = "", ylab = "",
+    axes = FALSE, asp = out_h / out_w
+  )
+  rasterImage(as.raster(img_ann), 0, 0, 1, 1)
+
+  # Overlay piece numbers at each centroid
+  # Centroid coordinates from EBImage: m.cx (x from left), m.cy (y from top).
+  # In R plot space: x_norm = m.cx / img_width, y_norm = 1 - m.cy / img_height
+  if (result$n_kept > 0) {
+    cx_norm <- result$moments[result$valid_ids, "m.cx"] / dim(img_ann)[1]
+    cy_norm <- 1 - result$moments[result$valid_ids, "m.cy"] / dim(img_ann)[2]
+
+    text(
+      x      = cx_norm,
+      y      = cy_norm,
+      labels = seq_along(result$valid_ids),
+      col    = "red",
+      cex    = 2.2,
+      font   = 2    # bold
+    )
+  }
+  dev.off()
+
+  # ── Store results ────────────────────────────────────────────────────────
+  all_areas[[i]] <- result$area_table
+}
+
+cat("\nDone! All scans processed.\n")
+```
+
+---
+
+## 5. Compile master area table
+
+Combine all per-scan CSVs into one file. This is the primary input for
+`03_sla_calculation.Rmd`.
+
+```{r compile-master}
+master_areas <- bind_rows(all_areas)
+
+# Add individual_id by stripping the trailing scan number (-01, -02, -03)
+# from the scan filename. The individual identifier is everything before
+# the last hyphen+digits suffix.
+# Example: "Ames29376-01_A27-02" → individual "Ames29376-01_A27"
+master_areas <- master_areas %>%
+  mutate(individual_id = str_replace(scan_id, "-\\d{2}$", ""))
+
+# Save master CSV
+master_path <- file.path(output_tables, "master_leaf_areas.csv")
+write_csv(master_areas, master_path)
+
+cat(sprintf(
+  "Master table saved to: %s\n%d rows | %d scans | %d individuals\n",
+  master_path,
+  nrow(master_areas),
+  n_distinct(master_areas$scan_id),
+  n_distinct(master_areas$individual_id)
+))
+```
+
+---
+
+## 6. Diagnostic summary
+
+Quick checks to catch any scans with unexpectedly high or low piece counts,
+which could indicate a segmentation problem.
+
+```{r diagnostics}
+# Pieces per scan
+pieces_per_scan <- master_areas %>%
+  count(scan_id, name = "n_pieces") %>%
+  arrange(n_pieces)
+
+cat("── Pieces per scan ─────────────────────────────────────────────────────\n")
+print(pieces_per_scan, n = Inf)
+
+# Flag any scans with very few or very many pieces
+expected_min <- 3    # a scan with < 3 pieces is probably incomplete
+expected_max <- 40   # > 40 is unusual for a compound Gymnocladus leaf
+
+flagged <- pieces_per_scan %>%
+  filter(n_pieces < expected_min | n_pieces > expected_max)
+
+if (nrow(flagged) > 0) {
+  cat("\n⚠ Scans with unexpected piece counts — review their labeled PNGs:\n")
+  print(flagged)
+} else {
+  cat("\nAll scans within expected piece count range.\n")
+}
+```
+
+```{r area-summary}
+# Area distribution across all pieces
+cat("\n── Area distribution (cm²) ────────────────────────────────────────────\n")
+summary(master_areas$area_cm2)
+
+# Histogram
+ggplot(master_areas, aes(x = area_cm2)) +
+  geom_histogram(bins = 40, fill = "#2d8e4a", color = "white") +
+  labs(
+    title = "Distribution of individual piece areas",
+    x = "Area (cm²)",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+```{r total-per-individual}
+# Total area per individual (summing all pieces across all scans)
+# In 03_sla_calculation.Rmd you can choose to exclude specific piece IDs before
+# summing. This is just a preview using all detected pieces.
+total_per_ind <- master_areas %>%
+  group_by(individual_id) %>%
+  summarise(
+    n_scans      = n_distinct(scan_id),
+    n_pieces     = n(),
+    total_area_cm2 = round(sum(area_cm2), 3),
+    .groups = "drop"
+  ) %>%
+  arrange(individual_id)
+
+cat("── Total leaf area per individual (all pieces, preview) ───────────────\n")
+print(total_per_ind, n = Inf)
+```
+
+---
+
+## 7. How to review labeled images
+
+The review PNGs in `output/labeled_images/` show each detected piece outlined
+in red and numbered. Open them in any image viewer.
+
+**If you see non-leaf objects with a piece number** (e.g., part of the color
+calibration card that was not masked out by the elongation filter), note those
+piece numbers. In `03_sla_calculation.Rmd` you can provide an exclusion table
+that drops specific piece IDs from specific scans before summing.
+
+**If a leaf piece is missing** (not outlined), it likely fell below the
+`min_area_cm2` threshold or was too dark to threshold correctly. Check whether
+the leaf was fully flat against the scanner glass.
+
+**If two leaf pieces appear merged into one**, they were touching or overlapping
+on the scanner bed. Overlapping pieces cannot be automatically separated without
+additional watershed processing. The best solution is to rescan with the pieces
+clearly separated.
+
+```{r session-info}
+sessionInfo()
+```

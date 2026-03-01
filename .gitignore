@@ -1,0 +1,21 @@
+# Raw scan images (large TIFFs — keep in Dropbox, not git)
+*.tif
+*.tiff
+*.TIF
+*.TIFF
+
+# Large output images
+output/labeled_images/*.png
+output/labeled_images/*.jpg
+
+# R workspace files
+.RData
+.Rhistory
+*.Rproj.user/
+
+# macOS
+.DS_Store
+
+# Keep the output folder structure
+!output/labeled_images/.gitkeep
+!output/area_tables/.gitkeep

@@ -1,0 +1,326 @@
+---
+title: "03 — SLA Calculation"
+author: "Natalie Love"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+## Overview
+
+**Specific Leaf Area (SLA)** = leaf area (cm²) / dry mass (g)
+
+High SLA → thin, cheap-to-build leaves typical of fast-growing, shade-tolerant
+or resource-rich environments.
+Low SLA → thick, dense leaves typical of drought-tolerant or high-light
+environments.
+
+This notebook:
+
+1. Loads the master leaf-area table produced by `02_batch_segment.Rmd`
+2. Lets you optionally exclude specific piece IDs (e.g., color card fragments
+   that were not automatically filtered)
+3. Loads your dry-weight data and joins it to the area data by individual ID
+4. Calculates total leaf area per individual (summing across all scans) and SLA
+5. Exports the final SLA table and diagnostic plots
+
+---
+
+## 1. Load packages
+
+```{r load-packages, message=FALSE, warning=FALSE}
+library(tidyverse)
+```
+
+---
+
+## 2. User configuration
+
+```{r user-config}
+# ── Input files ───────────────────────────────────────────────────────────────
+# Master area table produced by 02_batch_segment.Rmd
+master_areas_path <- "output/area_tables/master_leaf_areas.csv"
+
+# Your dry-weight data CSV. It must contain at least two columns:
+#   - an individual ID column that matches the 'individual_id' field in the
+#     master area table (e.g., "Ames29376-01_A27")
+#   - a dry weight column in grams
+#
+# Set the column names to match your file:
+dw_path          <- ""       # path to your dry weight CSV — FILL THIS IN
+dw_id_col        <- "individual_id"   # column name for the individual ID
+dw_weight_col    <- "dry_weight_g"    # column name for dry weight (grams)
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output_tables    <- "output/area_tables"
+sla_output_path  <- file.path(output_tables, "sla_results.csv")
+
+# ── Exclusions ────────────────────────────────────────────────────────────────
+# After reviewing the labeled PNGs in output/labeled_images/, you may find that
+# certain piece numbers in certain scans represent the color calibration card or
+# other non-leaf material that was not automatically removed.
+#
+# Specify those here as a data frame with two columns:
+#   scan_id   — the scan filename without .tif extension
+#   piece_num — the piece number shown in red on the labeled PNG
+#
+# Example:
+#   exclusions <- tribble(
+#     ~scan_id,              ~piece_num,
+#     "Ames29376-01_A27-01",  5,
+#     "Ames32901-07_E61-02",  1
+#   )
+#
+# Leave as an empty tibble if no exclusions are needed:
+exclusions <- tibble(scan_id = character(), piece_num = integer())
+
+# ── Area summation scope ──────────────────────────────────────────────────────
+# Choose which scans to include when summing area per individual.
+# This is useful if, for example, one scan was re-done and you want to exclude
+# the original, or if you only have dry weights for certain scans.
+#
+# Set to NULL to include all scans; or provide a character vector of scan_ids
+# to include (everything else is excluded from the sum):
+include_scans <- NULL   # e.g., c("Ames29376-01_A27-01", "Ames29376-01_A27-02")
+```
+
+---
+
+## 3. Load and filter the master area table
+
+```{r load-areas}
+master_areas <- read_csv(master_areas_path, show_col_types = FALSE)
+
+cat(sprintf(
+  "Master areas: %d pieces | %d scans | %d individuals\n",
+  nrow(master_areas),
+  n_distinct(master_areas$scan_id),
+  n_distinct(master_areas$individual_id)
+))
+
+glimpse(master_areas)
+```
+
+```{r apply-exclusions}
+# Remove any pieces flagged in the exclusions table above
+if (nrow(exclusions) > 0) {
+  before <- nrow(master_areas)
+  master_areas <- master_areas %>%
+    anti_join(exclusions, by = c("scan_id", "piece_num"))
+  after <- nrow(master_areas)
+  cat(sprintf("Excluded %d pieces based on manual exclusion list.\n",
+              before - after))
+} else {
+  cat("No manual exclusions applied.\n")
+}
+```
+
+```{r apply-scan-filter}
+# Optionally restrict to a specified set of scans
+if (!is.null(include_scans)) {
+  before <- nrow(master_areas)
+  master_areas <- master_areas %>%
+    filter(scan_id %in% include_scans)
+  after <- nrow(master_areas)
+  cat(sprintf("Restricted to %d specified scans. Removed %d rows.\n",
+              length(include_scans), before - after))
+} else {
+  cat("Using all scans.\n")
+}
+```
+
+---
+
+## 4. Sum area per individual
+
+Each individual may have multiple scans (e.g., 3 batches of leaflets scanned
+separately). Summing across all scans gives the total leaf area weighed for
+that individual.
+
+```{r sum-per-individual}
+area_per_individual <- master_areas %>%
+  group_by(individual_id) %>%
+  summarise(
+    n_scans        = n_distinct(scan_id),
+    n_pieces       = n(),
+    total_area_cm2 = round(sum(area_cm2), 4),
+    .groups        = "drop"
+  ) %>%
+  arrange(individual_id)
+
+cat("── Total leaf area per individual ──────────────────────────────────────\n")
+print(area_per_individual, n = Inf)
+```
+
+---
+
+## 5. Load dry weight data and join
+
+```{r load-dry-weights}
+# ── Guard: check the dry weight path is set ───────────────────────────────────
+if (dw_path == "") {
+  message(
+    "⚠  No dry weight file specified. Set `dw_path` in the user configuration\n",
+    "   chunk above and re-run this notebook.\n\n",
+    "   The area-per-individual table has been calculated and is available as\n",
+    "   `area_per_individual`. SLA cannot be computed without dry weights."
+  )
+  knitr::knit_exit()
+}
+
+dry_weights <- read_csv(dw_path, show_col_types = FALSE)
+
+# Rename columns to standard names for the join
+dry_weights <- dry_weights %>%
+  rename(
+    individual_id = all_of(dw_id_col),
+    dry_weight_g  = all_of(dw_weight_col)
+  ) %>%
+  select(individual_id, dry_weight_g)
+
+cat(sprintf("Dry weights loaded: %d individuals\n", nrow(dry_weights)))
+```
+
+```{r join-areas-weights}
+# Left join: keep all individuals with area data; flag those missing dry weight
+sla_data <- area_per_individual %>%
+  left_join(dry_weights, by = "individual_id")
+
+# Report any individuals without a dry weight match
+missing_dw <- sla_data %>% filter(is.na(dry_weight_g))
+if (nrow(missing_dw) > 0) {
+  cat(sprintf(
+    "⚠  %d individuals have area data but no dry weight:\n", nrow(missing_dw)
+  ))
+  print(missing_dw$individual_id)
+}
+
+# Report any dry weights without matching area data
+missing_area <- dry_weights %>%
+  anti_join(area_per_individual, by = "individual_id")
+if (nrow(missing_area) > 0) {
+  cat(sprintf(
+    "⚠  %d individuals have dry weight but no area data:\n", nrow(missing_area)
+  ))
+  print(missing_area$individual_id)
+}
+```
+
+---
+
+## 6. Calculate SLA
+
+SLA is expressed here in two common units:
+
+- **cm²/g** — the raw ratio from this analysis
+- **m²/kg** — the standard unit in the TRY Plant Trait Database and most
+  literature (numerically equivalent to cm²/g, since both ×/÷ by 10,000)
+
+```{r calculate-sla}
+sla_results <- sla_data %>%
+  mutate(
+    sla_cm2_per_g  = round(total_area_cm2 / dry_weight_g, 2),
+    sla_m2_per_kg  = sla_cm2_per_g   # cm²/g is numerically equal to m²/kg
+  ) %>%
+  filter(!is.na(sla_cm2_per_g))  # drop rows where dry weight was missing
+
+cat("── SLA results ─────────────────────────────────────────────────────────\n")
+print(sla_results %>% select(individual_id, total_area_cm2, dry_weight_g,
+                              sla_cm2_per_g, sla_m2_per_kg),
+      n = Inf)
+```
+
+---
+
+## 7. Export results
+
+```{r export-results}
+write_csv(sla_results, sla_output_path)
+cat(sprintf("SLA results saved to: %s\n", sla_output_path))
+
+# Also save the area-per-individual table in case dry weights come later
+write_csv(area_per_individual,
+          file.path(output_tables, "area_per_individual.csv"))
+cat("Area-per-individual table also saved.\n")
+```
+
+---
+
+## 8. Summary statistics and plots
+
+```{r sla-summary}
+cat("── SLA summary (cm²/g = m²/kg) ─────────────────────────────────────────\n")
+summary(sla_results$sla_cm2_per_g)
+cat(sprintf("n = %d individuals\n", nrow(sla_results)))
+```
+
+```{r sla-histogram, fig.width=7, fig.height=4}
+ggplot(sla_results, aes(x = sla_cm2_per_g)) +
+  geom_histogram(bins = 20, fill = "#2d8e4a", color = "white") +
+  geom_vline(aes(xintercept = median(sla_cm2_per_g, na.rm = TRUE)),
+             linetype = "dashed", color = "grey30") +
+  labs(
+    title = "Distribution of SLA across individuals",
+    subtitle = paste0("Median = ",
+                      round(median(sla_results$sla_cm2_per_g, na.rm = TRUE), 1),
+                      " cm²/g"),
+    x = "SLA (cm²/g)",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+```{r area-vs-weight, fig.width=6, fig.height=5}
+ggplot(sla_results, aes(x = dry_weight_g, y = total_area_cm2)) +
+  geom_point(color = "#2d8e4a", alpha = 0.7, size = 2.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "grey40", linewidth = 0.8) +
+  labs(
+    title  = "Total leaf area vs. dry weight",
+    x      = "Dry weight (g)",
+    y      = "Total leaf area (cm²)"
+  ) +
+  theme_minimal()
+```
+
+---
+
+## 9. Extracting piece-level data for flexible area sums
+
+The `master_leaf_areas.csv` table retains one row per piece, so you can always
+re-sum in different ways — for example, to include only leaflets and exclude
+the rachis, or to sum only scans 1 and 2 for a given individual.
+
+```{r flexible-sum-example, eval=FALSE}
+# Example: sum only pieces with area_cm2 > 1 cm² (likely only true leaflets)
+leaflets_only <- master_areas %>%
+  filter(area_cm2 > 1) %>%
+  group_by(individual_id) %>%
+  summarise(total_leaflet_area_cm2 = sum(area_cm2), .groups = "drop")
+
+# Example: sum scans -01 and -02 only (exclude third scan batch)
+two_scans <- master_areas %>%
+  filter(str_detect(scan_id, "-(01|02)$")) %>%
+  group_by(individual_id) %>%
+  summarise(total_area_cm2 = sum(area_cm2), .groups = "drop")
+```
+
+---
+
+## 10. Field column descriptions
+
+| Column | Units | Description |
+|---|---|---|
+| `individual_id` | — | Tree identifier (`accession_individual`, e.g. `Ames29376-01_A27`) |
+| `n_scans` | — | Number of separate scan files included in the sum |
+| `n_pieces` | — | Total number of detected leaf pieces across all scans |
+| `total_area_cm2` | cm² | Sum of all piece areas |
+| `dry_weight_g` | g | Oven-dry mass of the sampled material |
+| `sla_cm2_per_g` | cm²/g | Specific leaf area |
+| `sla_m2_per_kg` | m²/kg | Same value, standard TRY database units |
+
+```{r session-info}
+sessionInfo()
+```

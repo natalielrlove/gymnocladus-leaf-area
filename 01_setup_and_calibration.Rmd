@@ -207,14 +207,63 @@ cat("Expected pixel widths at 300 DPI:\n")
 for (d in distances_mm) {
   cat(sprintf("  %3d mm  =  %6.1f pixels\n", d, d * px_per_mm))
 }
+```
 
-cat(
-  "\nTo verify: find two tick marks separated by a known distance on the ruler",
-  "in the cropped image above. The pixel distance between them should match",
-  "the values in the table. If they differ by more than ~2%, update `dpi`",
-  "in the user configuration chunk above.\n",
-  sep = "\n"
+### How to verify the calibration interactively
+
+Run the chunk below **by clicking its green play button** — do not knit.
+It opens the ruler crop in the RStudio Plots pane and waits for you to
+click on **two tick marks** whose real-world distance you know (e.g., the
+0 mm and 50 mm marks). After two clicks, R prints the measured pixel
+distance and calculates what DPI that implies.
+
+```{r measure-ruler, eval=FALSE}
+# ── Step 1: display the ruler crop in the Plots pane ────────────────────────
+crop_w <- dim(ruler_crop)[1]
+crop_h <- dim(ruler_crop)[2]
+
+# Use a base R plot so locator() can capture clicks on it.
+# x-axis = pixels from left edge of crop; y-axis = pixels from bottom edge.
+plot(
+  NULL,
+  xlim = c(0, crop_w), ylim = c(0, crop_h),
+  xlab = "x (pixels from left of crop)",
+  ylab = "y (pixels from bottom of crop)",
+  asp  = 1,
+  main = "Click on two ruler tick marks, then press Escape"
 )
+rasterImage(as.raster(ruler_crop), 0, 0, crop_w, crop_h)
+
+# ── Step 2: click two points ─────────────────────────────────────────────────
+# After running this chunk, move your mouse onto the plot and click once on
+# each of the two tick marks. Red crosses mark your clicks.
+# Press Escape when done (or after two clicks R will stop automatically).
+message("Click on TWO tick marks in the Plots pane now...")
+pts <- locator(2, type = "p", pch = 4, col = "red", cex = 2, lwd = 2)
+
+# ── Step 3: report results ────────────────────────────────────────────────────
+# The ruler is horizontal so only the x-distance matters; y-variation is just
+# click imprecision and doesn't affect the measurement.
+dist_px <- abs(diff(pts$x))
+cat(sprintf("\nPixel distance between your two clicks: %.1f px\n", dist_px))
+
+# Ask the user how far apart those marks were in real life
+known_mm <- as.numeric(readline("How many mm apart were those two tick marks? "))
+
+measured_dpi <- (dist_px / known_mm) * 25.4
+cat(sprintf("Implied DPI from your measurement:      %.1f\n", measured_dpi))
+cat(sprintf("DPI set in user-config chunk:           %.1f\n", dpi))
+cat(sprintf("Difference:                             %.1f%%\n",
+            abs(measured_dpi - dpi) / dpi * 100))
+
+if (abs(measured_dpi - dpi) / dpi > 0.02) {
+  cat(sprintf(
+    "\n>> Update `dpi <- %.0f` in the user-config chunk and re-run.\n",
+    round(measured_dpi)
+  ))
+} else {
+  cat("\nCalibration looks good — within 2%% of the configured DPI.\n")
+}
 ```
 
 ---

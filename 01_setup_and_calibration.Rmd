@@ -218,11 +218,16 @@ click on **two tick marks** whose real-world distance you know (e.g., the
 distance and calculates what DPI that implies.
 
 ```{r measure-ruler, eval=FALSE}
-# ── Step 1: display the ruler crop in the Plots pane ────────────────────────
+# ── Step 1: open a dedicated interactive plot window ─────────────────────────
+# RStudio notebooks render chunk plots as static inline images by default,
+# which means locator() cannot capture clicks on them. dev.new() forces the
+# plot into a separate interactive window where clicking works correctly.
+dev.new(width = 10, height = 4, noRStudioGD = TRUE)
+
+# ── Step 2: display the ruler crop ───────────────────────────────────────────
 crop_w <- dim(ruler_crop)[1]
 crop_h <- dim(ruler_crop)[2]
 
-# Use a base R plot so locator() can capture clicks on it.
 # x-axis = pixels from left edge of crop; y-axis = pixels from bottom edge.
 plot(
   NULL,
@@ -230,24 +235,30 @@ plot(
   xlab = "x (pixels from left of crop)",
   ylab = "y (pixels from bottom of crop)",
   asp  = 1,
-  main = "Click on two ruler tick marks, then press Escape"
+  main = "Click on TWO ruler tick marks, then R continues automatically"
 )
 rasterImage(as.raster(ruler_crop), 0, 0, crop_w, crop_h)
 
-# ── Step 2: click two points ─────────────────────────────────────────────────
-# After running this chunk, move your mouse onto the plot and click once on
-# each of the two tick marks. Red crosses mark your clicks.
-# Press Escape when done (or after two clicks R will stop automatically).
-message("Click on TWO tick marks in the Plots pane now...")
+# ── Step 3: click two points ─────────────────────────────────────────────────
+# Click once on each of two tick marks whose real-world distance you know
+# (e.g., the 0 mm and 50 mm marks). Red crosses confirm each click.
+# R stops waiting automatically after exactly two clicks — no Escape needed.
+message("Waiting for two clicks in the plot window...")
 pts <- locator(2, type = "p", pch = 4, col = "red", cex = 2, lwd = 2)
 
-# ── Step 3: report results ────────────────────────────────────────────────────
-# The ruler is horizontal so only the x-distance matters; y-variation is just
-# click imprecision and doesn't affect the measurement.
+# ── Step 4: guard against pressing Escape before two clicks ──────────────────
+if (is.null(pts) || length(pts$x) < 2) {
+  stop("Only ", length(pts$x), " click(s) recorded. ",
+       "Re-run the chunk and click exactly two tick marks.")
+}
+
+# ── Step 5: report results ────────────────────────────────────────────────────
+# The ruler is horizontal so only the x-distance matters; any y-variation
+# between your two clicks is just imprecision and is ignored.
 dist_px <- abs(diff(pts$x))
 cat(sprintf("\nPixel distance between your two clicks: %.1f px\n", dist_px))
 
-# Ask the user how far apart those marks were in real life
+# Enter the known real-world distance between those two tick marks
 known_mm <- as.numeric(readline("How many mm apart were those two tick marks? "))
 
 measured_dpi <- (dist_px / known_mm) * 25.4
@@ -264,6 +275,8 @@ if (abs(measured_dpi - dpi) / dpi > 0.02) {
 } else {
   cat("\nCalibration looks good — within 2%% of the configured DPI.\n")
 }
+
+dev.off()   # close the measurement window when done
 ```
 
 ---

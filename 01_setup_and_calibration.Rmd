@@ -200,72 +200,68 @@ cat(sprintf("Ruler crop: %d x %d pixels\n", dim(ruler_crop)[1], dim(ruler_crop)[
 display(ruler_crop, method = "raster")
 ```
 
-```{r expected-calibration}
-# ── Expected pixel widths for common ruler distances at 300 DPI ─────────────
-distances_mm <- c(10, 20, 30, 50, 100)
-cat("Expected pixel widths at 300 DPI:\n")
-for (d in distances_mm) {
-  cat(sprintf("  %3d mm  =  %6.1f pixels\n", d, d * px_per_mm))
+```{r verify-dpi-from-metadata}
+# ── Read DPI directly from the TIFF file metadata ────────────────────────────
+# Every TIFF produced by a flatbed scanner stores its resolution in the file
+# header (XResolution / YResolution tags). Reading this is far more reliable
+# than trying to measure pixel distances manually.
+#
+# The `tiff` package (installed automatically as an EBImage dependency) exposes
+# these tags via readTIFF(..., info = TRUE).
+
+library(tiff)
+
+tif_raw  <- readTIFF(test_path, info = TRUE, all = FALSE)
+file_dpi <- attr(tif_raw, "x.resolution")   # pixels per inch stored in file
+
+if (is.null(file_dpi)) {
+  cat("Resolution metadata not found in this TIFF. See manual fallback below.\n")
+} else {
+  cat(sprintf("DPI stored in TIFF metadata:  %.1f\n", file_dpi))
+  cat(sprintf("DPI set in user-config chunk: %.1f\n", dpi))
+  cat(sprintf("Difference:                   %.1f%%\n",
+              abs(file_dpi - dpi) / dpi * 100))
+
+  if (abs(file_dpi - dpi) / dpi > 0.02) {
+    cat(sprintf(
+      "\n>> Update `dpi <- %.0f` in the user-config chunk to match the file.\n",
+      round(file_dpi)
+    ))
+  } else {
+    cat("\nCalibration confirmed — config DPI matches file metadata.\n")
+  }
 }
 ```
 
-### How to verify the calibration interactively
-
-Run the chunk below **by clicking its green play button** — do not knit.
-It opens the ruler crop in the RStudio Plots pane and waits for you to
-click on **two tick marks** whose real-world distance you know (e.g., the
-0 mm and 50 mm marks). After two clicks, R prints the measured pixel
-distance and calculates what DPI that implies.
-
-```{r measure-ruler, eval=FALSE}
-# ── Step 1: open a dedicated interactive plot window ─────────────────────────
-# RStudio notebooks render chunk plots as static inline images by default,
-# which means locator() cannot capture clicks on them. dev.new() forces the
-# plot into a separate interactive window where clicking works correctly.
-dev.new(width = 10, height = 4, noRStudioGD = TRUE)
-
-# ── Step 2: display the ruler crop ───────────────────────────────────────────
-crop_w <- dim(ruler_crop)[1]
-crop_h <- dim(ruler_crop)[2]
-
-# x-axis = pixels from left edge of crop; y-axis = pixels from bottom edge.
-plot(
-  NULL,
-  xlim = c(0, crop_w), ylim = c(0, crop_h),
-  xlab = "x (pixels from left of crop)",
-  ylab = "y (pixels from bottom of crop)",
-  asp  = 1,
-  main = "Click on TWO ruler tick marks, then R continues automatically"
-)
-rasterImage(as.raster(ruler_crop), 0, 0, crop_w, crop_h)
-
-# ── Step 3: click two points ─────────────────────────────────────────────────
-# Click once on each of two tick marks whose real-world distance you know
-# (e.g., the 0 mm and 50 mm marks). Red crosses confirm each click.
-# R stops waiting automatically after exactly two clicks — no Escape needed.
-message("Waiting for two clicks in the plot window...")
-pts <- locator(2, type = "p", pch = 4, col = "red", cex = 2, lwd = 2)
-
-# ── Step 4: guard against pressing Escape before two clicks ──────────────────
-if (is.null(pts) || length(pts$x) < 2) {
-  stop("Only ", length(pts$x), " click(s) recorded. ",
-       "Re-run the chunk and click exactly two tick marks.")
+```{r expected-calibration}
+# ── Reference table: expected pixel widths at the configured DPI ─────────────
+distances_mm <- c(10, 20, 30, 50, 100)
+cat(sprintf("Expected pixel widths at %d DPI:\n", dpi))
+for (d in distances_mm) {
+  cat(sprintf("  %3d mm  =  %6.1f pixels\n", d, d * px_per_mm))
 }
+cat("\nYou can visually cross-check these values against the ruler crop above.\n")
+```
 
-# ── Step 5: report results ────────────────────────────────────────────────────
-# The ruler is horizontal so only the x-distance matters; any y-variation
-# between your two clicks is just imprecision and is ignored.
-dist_px <- abs(diff(pts$x))
-cat(sprintf("\nPixel distance between your two clicks: %.1f px\n", dist_px))
+### Optional manual fallback
 
-# Enter the known real-world distance between those two tick marks
-known_mm <- as.numeric(readline("How many mm apart were those two tick marks? "))
+If the TIFF metadata check above showed `NULL` (rare — some scanning software
+does not write resolution tags), you can enter a measurement here instead.
 
-measured_dpi <- (dist_px / known_mm) * 25.4
-cat(sprintf("Implied DPI from your measurement:      %.1f\n", measured_dpi))
-cat(sprintf("DPI set in user-config chunk:           %.1f\n", dpi))
-cat(sprintf("Difference:                             %.1f%%\n",
-            abs(measured_dpi - dpi) / dpi * 100))
+To get a pixel measurement: save the ruler crop image, open it in **Preview**
+(macOS), draw a selection over a known ruler distance using the Rectangle Select
+tool, and read the width in pixels from the status bar at the bottom of the
+window. Then fill in the two values below and run the chunk.
+
+```{r manual-dpi-fallback, eval=FALSE}
+# Only run this chunk if the metadata check above returned NULL.
+
+measured_dist_px <- 591   # <-- pixel width of your selection in Preview
+known_mm         <- 50    # <-- real-world width of that same span on the ruler
+
+measured_dpi <- (measured_dist_px / known_mm) * 25.4
+cat(sprintf("Implied DPI from manual measurement: %.1f\n", measured_dpi))
+cat(sprintf("DPI set in user-config chunk:        %.1f\n", dpi))
 
 if (abs(measured_dpi - dpi) / dpi > 0.02) {
   cat(sprintf(
@@ -273,10 +269,8 @@ if (abs(measured_dpi - dpi) / dpi > 0.02) {
     round(measured_dpi)
   ))
 } else {
-  cat("\nCalibration looks good — within 2%% of the configured DPI.\n")
+  cat("\nCalibration looks good — within 2%%.\n")
 }
-
-dev.off()   # close the measurement window when done
 ```
 
 ---

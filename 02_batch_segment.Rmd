@@ -74,9 +74,10 @@ px2_per_cm2    <- px_per_cm^2
 min_area_cm2   <- 0.25
 
 # Maximum elongation ratio (longest radius / shortest radius).
-# The white ruler is extremely elongated. Set this to exclude it automatically.
-# Leaf pieces and the color card are more compact (ratio usually < 4).
-max_elongation <- 6.0
+# The white ruler is extremely elongated — ratio typically 50–200.
+# Gymnocladus leaflets range ~1.5–4. Rachis stems ~10–30.
+# A cutoff of 10 keeps all leaflet shapes while removing rachis and ruler.
+max_elongation <- 10.0
 
 # ── Output image scale ────────────────────────────────────────────────────────
 # Review PNGs are saved at this fraction of the original resolution.
@@ -107,7 +108,7 @@ and returns a named list with:
 segment_scan <- function(tif_path,
                          px_per_mm      = 300 / 25.4,
                          min_area_cm2   = 0.25,
-                         max_elongation = 6.0) {
+                         max_elongation = 10.0) {
 
   px2_per_cm2 <- (px_per_mm * 10)^2   # pixels² per cm²
   scan_id     <- tools::file_path_sans_ext(basename(tif_path))

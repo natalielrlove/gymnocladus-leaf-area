@@ -98,10 +98,12 @@ cat(sprintf("Calibration: %.3f px/mm  |  %.3f px/cm  |  %.1f px²/cm²\n",
 min_area_cm2 <- 0.25
 
 # Maximum elongation ratio (radius_max / radius_min) for an object to be kept.
-# The white ruler is extremely elongated (long, thin bar). Leaf pieces and the
-# color card are much more compact. A ratio above ~6 almost certainly indicates
-# the ruler or a similar artifact.
-max_elongation <- 6.0
+# The white ruler is extremely elongated — its ratio is typically 50–200.
+# Gymnocladus leaflets range from ~1.5 (round) to ~4 (narrow/curled).
+# The rachis stem is ~10–30. A cutoff of 10 catches the rachis and ruler
+# while keeping all realistic leaflet shapes.
+# Increase this value if narrow or curled leaflets are being dropped.
+max_elongation <- 10.0
 
 # ── Output image resolution ─────────────────────────────────────────────────
 # Labeled review images are saved at a fraction of the original resolution to
@@ -340,15 +342,38 @@ keep        <- keep_area & keep_shape
 valid_ids   <- which(keep)
 cat(sprintf("Objects after filtering: %d\n", length(valid_ids)))
 
+# ── Filter diagnostic: show what was removed and why ─────────────────────────
+# This is printed so you can see if any leaflets are being accidentally dropped.
+dropped <- tibble(
+  orig_label  = seq_len(nrow(features)),
+  area_cm2    = round(features[, "s.area"] / px2_per_cm2, 3),
+  elongation  = round(elongation, 2),
+  fail_area   = !keep_area,
+  fail_shape  = !keep_shape
+) %>%
+  filter(fail_area | fail_shape)
+
+cat(sprintf("\n%d objects dropped by filters:\n", nrow(dropped)))
+if (nrow(dropped) > 0) print(dropped)
+cat("\nIf any row above looks like a real leaflet (area_cm2 > 1, elongation < 4),\n")
+cat("consider raising max_elongation or lowering min_area_cm2 in the config.\n")
+
 # ── Step 10: Get centroids for label placement ───────────────────────────────
 moments <- computeFeatures.moment(labeled)
 
 # ── Step 11: Display annotated review image with piece numbers ───────────────
-# paintObjects() draws red outlines around each surviving object.
+# Build a labeled mask containing ONLY the surviving valid objects.
+# This ensures red outlines and numbers match exactly — no outlines without
+# a number, no numbers without an outline.
+labeled_valid <- labeled
+for (bad_id in setdiff(seq_len(max(labeled)), valid_ids)) {
+  labeled_valid[labeled_valid == bad_id] <- 0L
+}
+
 img_annotated <- paintObjects(
-  x     = labeled,
+  x     = labeled_valid,     # only valid objects outlined
   tgt   = img,
-  opac  = c(1, 0),            # solid outline, no fill (cleaner for labels)
+  opac  = c(1, 0),
   col   = c("#FF3300", NA),
   thick = TRUE
 )

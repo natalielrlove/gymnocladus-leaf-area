@@ -148,7 +148,10 @@ correctly, and display a thumbnail so you can visually confirm the layout.
 test_path <- tif_files[1]
 cat("Loading:", basename(test_path), "\n")
 
-img <- readImage(test_path)
+# all = FALSE reads only the first frame (the full-res scan).
+# Scanner TIFFs often embed a lower-resolution thumbnail as a second frame;
+# EBImage errors if it tries to stack frames of different dimensions.
+img <- readImage(test_path, all = FALSE)
 
 # Report basic properties
 cat(sprintf(

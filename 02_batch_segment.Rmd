@@ -113,7 +113,10 @@ segment_scan <- function(tif_path,
   scan_id     <- tools::file_path_sans_ext(basename(tif_path))
 
   # ── 1. Read image ────────────────────────────────────────────────────────
-  img <- readImage(tif_path)
+  # all = FALSE reads only the first frame (the full-res scan).
+  # Scanner TIFFs often embed a lower-resolution thumbnail as a second frame;
+  # EBImage errors if it tries to stack frames of different dimensions.
+  img <- readImage(tif_path, all = FALSE)
   img_w <- dim(img)[1]
   img_h <- dim(img)[2]
 

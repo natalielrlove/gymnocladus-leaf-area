@@ -71,7 +71,7 @@ three notebooks. Copy them into the matching chunk at the top of
 ```{r user-config}
 # ── Path to the folder containing your raw TIFF scans ──────────────────────
 # Use an absolute path or a path relative to the project root.
-scan_folder <- "/Users/natalielove/Dropbox/1-Cloud/CBG/Research/Gymnocladus_dioicus/field_work/06232025_Ames_Iowa/leaf_scans"
+scan_folder <- "data/leaf_scans"
 
 # ── Output folders (created automatically if they don't exist) ──────────────
 output_labels <- "output/labeled_images"   # annotated review PNGs
@@ -185,8 +185,8 @@ correspond to a known distance on the ruler.
 ```{r calibration-check, fig.width=5, fig.height=3}
 # Crop the bottom-right corner of the image where the ruler is located.
 # Adjust these fractions if the ruler is positioned differently in your scans.
-crop_bottom_frac <- 0.15   # take the bottom 15% of the image height
-crop_right_frac  <- 0.35   # take the right 35% of the image width
+crop_bottom_frac <- 0.05   # take the bottom 15% of the image height
+crop_right_frac  <- 0.55   # take the right 35% of the image width
 
 img_w <- dim(img)[1]
 img_h <- dim(img)[2]
@@ -208,18 +208,13 @@ for (d in distances_mm) {
   cat(sprintf("  %3d mm  =  %6.1f pixels\n", d, d * px_per_mm))
 }
 
-cat(sprintf(
-  "\nTo verify: find two tick marks separated by a known distance on the ruler\n",
-))
-cat(sprintf(
-  "in the cropped image above. The pixel distance between them should match\n"
-))
-cat(sprintf(
-  "the values in the table. If they differ by more than ~2%%, update `dpi`\n"
-))
-cat(sprintf(
-  "in the user configuration chunk above.\n"
-))
+cat(
+  "\nTo verify: find two tick marks separated by a known distance on the ruler",
+  "in the cropped image above. The pixel distance between them should match",
+  "the values in the table. If they differ by more than ~2%, update `dpi`",
+  "in the user configuration chunk above.\n",
+  sep = "\n"
+)
 ```
 
 ---

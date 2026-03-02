@@ -233,6 +233,9 @@ if (is.null(file_dpi)) {
 }
 ```
 
+
+### Optional manual fallback
+
 ```{r expected-calibration}
 # ── Reference table: expected pixel widths at the configured DPI ─────────────
 distances_mm <- c(10, 20, 30, 50, 100)
@@ -243,8 +246,6 @@ for (d in distances_mm) {
 cat("\nYou can visually cross-check these values against the ruler crop above.\n")
 ```
 
-### Optional manual fallback
-
 If the TIFF metadata check above showed `NULL` (rare — some scanning software
 does not write resolution tags), you can enter a measurement here instead.
 
@@ -253,11 +254,16 @@ To get a pixel measurement: save the ruler crop image, open it in **Preview**
 tool, and read the width in pixels from the status bar at the bottom of the
 window. Then fill in the two values below and run the chunk.
 
+# confirmed DPI for Ames images on 03/01/2026
+
 ```{r manual-dpi-fallback, eval=FALSE}
 # Only run this chunk if the metadata check above returned NULL.
 
-measured_dist_px <- 591   # <-- pixel width of your selection in Preview
-known_mm         <- 50    # <-- real-world width of that same span on the ruler
+# export image
+# writeImage(ruler_crop, "output/scale_bar/scale_bar_Ames29376-01.tiff")
+
+measured_dist_px <- 118   # <-- pixel width of your selection in Preview
+known_mm         <- 10    # <-- real-world width of that same span on the ruler
 
 measured_dpi <- (measured_dist_px / known_mm) * 25.4
 cat(sprintf("Implied DPI from manual measurement: %.1f\n", measured_dpi))
@@ -337,18 +343,42 @@ cat(sprintf("Objects after filtering: %d\n", length(valid_ids)))
 # ── Step 10: Get centroids for label placement ───────────────────────────────
 moments <- computeFeatures.moment(labeled)
 
-# ── Step 11: Display annotated review image ─────────────────────────────────
-# Overlay outlines of surviving objects on the original image
+# ── Step 11: Display annotated review image with piece numbers ───────────────
+# paintObjects() draws red outlines around each surviving object.
 img_annotated <- paintObjects(
-  x      = labeled,
-  tgt    = img,
-  opac   = c(0.8, 0.3),          # (outline opacity, fill opacity)
-  col    = c("#FF0000", "#FF000020"),   # red outline, faint red fill
-  thick  = TRUE
+  x     = labeled,
+  tgt   = img,
+  opac  = c(1, 0),            # solid outline, no fill (cleaner for labels)
+  col   = c("#FF3300", NA),
+  thick = TRUE
 )
 
-display(resize(img_annotated, w = round(dim(img_annotated)[1] * review_scale)),
-        method = "raster")
+# Resize for display
+img_display <- resize(img_annotated, w = round(dim(img_annotated)[1] * review_scale))
+out_w <- dim(img_display)[1]
+out_h <- dim(img_display)[2]
+
+# Scale centroid coordinates to match the resized image.
+# m.cx / m.cy are in full-resolution pixel space; multiply by review_scale
+# to get coordinates in the resized image space.
+# Y must be flipped: image y increases downward, but R plots y increasing upward,
+# so cy_plot = out_h - (m.cy * review_scale).
+cx_plot <- moments[valid_ids, "m.cx"] * review_scale
+cy_plot <- out_h - moments[valid_ids, "m.cy"] * review_scale
+
+# Draw image using base R so we can overlay text with text()
+par(mar = c(0, 0, 0, 0))
+plot(NULL, xlim = c(0, out_w), ylim = c(0, out_h), asp = 1,
+     axes = FALSE, xlab = "", ylab = "")
+rasterImage(as.raster(img_display), 0, 0, out_w, out_h)
+
+# Add piece numbers at each centroid
+# Yellow with a dark outline gives visibility on both light and dark backgrounds
+text(cx_plot, cy_plot,
+     labels = seq_along(valid_ids),
+     col    = "yellow",
+     cex    = 1.8,
+     font   = 2)   # bold
 ```
 
 ```{r test-area-table}

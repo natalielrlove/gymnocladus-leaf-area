@@ -314,6 +314,14 @@ for (i in seq_along(tif_files)) {
 
   # ── Store results ────────────────────────────────────────────────────────
   all_areas[[i]] <- result$area_table
+
+  # Free memory before loading the next scan.
+  # Each 60 MB TIFF expands to ~435 MB in R (uncompressed, 64-bit doubles),
+  # and the pipeline creates several intermediate copies. gc() asks R to
+  # reclaim that memory immediately rather than waiting for the next
+  # automatic garbage collection cycle.
+  rm(result)
+  gc(verbose = FALSE)
 }
 
 cat("\nDone! All scans processed.\n")
